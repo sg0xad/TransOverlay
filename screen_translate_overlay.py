@@ -353,6 +353,7 @@ def format_hotkey_display(pynput_hotkey: str) -> str:
 
 class HotkeyRecorderEdit(QLineEdit):
     hotkey_changed = pyqtSignal(str)
+    recording_changed = pyqtSignal(bool)
 
     def __init__(self, initial_hotkey: str = "", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -391,7 +392,9 @@ class HotkeyRecorderEdit(QLineEdit):
             )
 
     def mousePressEvent(self, event) -> None:
-        self._recording = True
+        if not self._recording:
+            self._recording = True
+            self.recording_changed.emit(True)
         self._refresh_text()
         self.setFocus()
         super().mousePressEvent(event)
@@ -400,6 +403,7 @@ class HotkeyRecorderEdit(QLineEdit):
         if self._recording:
             self._recording = False
             self._refresh_text()
+            self.recording_changed.emit(False)
         super().focusOutEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -411,6 +415,7 @@ class HotkeyRecorderEdit(QLineEdit):
         if key == Qt.Key.Key_Escape:
             self._recording = False
             self._refresh_text()
+            self.recording_changed.emit(False)
             return
 
         if key in MODIFIER_ONLY_KEYS:
@@ -440,6 +445,7 @@ class HotkeyRecorderEdit(QLineEdit):
         self._hotkey = new_hotkey
         self._recording = False
         self._refresh_text()
+        self.recording_changed.emit(False)
         self.hotkey_changed.emit(new_hotkey)
 
     @staticmethod
@@ -482,6 +488,14 @@ class GlobalHotkeyManager(QObject):
         self._poll_stop = threading.Event()
         self._poll_thread: Optional[threading.Thread] = None
         self._vk_bindings: list[tuple[list[int], Callable[[], None]]] = []
+        self._paused = False
+        self._ignore_until = 0.0
+
+    def set_paused(self, paused: bool) -> None:
+        """단축키 녹화 중에는 전역 단축키 발동을 일시정지하고, 해제 직후 눌려있는 키를 무시한다."""
+        self._paused = bool(paused)
+        if not paused:
+            self._ignore_until = time.monotonic() + 0.45
 
     def register(self, config: AppConfig) -> bool:
         self.stop()
@@ -527,11 +541,22 @@ class GlobalHotkeyManager(QObject):
 
     def _win32_poll_loop(self) -> None:
         user32 = ctypes.windll.user32
-        prev_down: list[bool] = [False] * len(self._vk_bindings)
+        # 등록 시점에 이미 눌려 있는 키 조합은 발동하지 않도록 초기 상태를 현재 키 상태로 스냅샷!
+        prev_down: list[bool] = [
+            all((user32.GetAsyncKeyState(vk) & 0x8000) != 0 for vk in vks)
+            for vks, _ in self._vk_bindings
+        ]
         last_fire = 0.0
 
         while not self._poll_stop.is_set():
             now = time.monotonic()
+            if self._paused or now < self._ignore_until:
+                # 일시정지/유예 중에도 눌림 상태를 계속 갱신해 키를 떼기 전에는 절대 발동 안 되게 함
+                for idx, (vks, _) in enumerate(self._vk_bindings):
+                    prev_down[idx] = all((user32.GetAsyncKeyState(vk) & 0x8000) != 0 for vk in vks)
+                time.sleep(0.025)
+                continue
+
             for idx, (vks, cb) in enumerate(self._vk_bindings):
                 all_down = all((user32.GetAsyncKeyState(vk) & 0x8000) != 0 for vk in vks)
                 if all_down and not prev_down[idx]:
@@ -2549,9 +2574,9 @@ class MainWindow(QMainWindow):
         self._hk_fullscreen_edit = HotkeyRecorderEdit()
         self._hk_region_edit = HotkeyRecorderEdit()
         self._hk_close_edit = HotkeyRecorderEdit()
-        self._hk_fullscreen_edit.hotkey_changed.connect(self._on_hotkeys_changed)
-        self._hk_region_edit.hotkey_changed.connect(self._on_hotkeys_changed)
-        self._hk_close_edit.hotkey_changed.connect(self._on_hotkeys_changed)
+        for _ed in (self._hk_fullscreen_edit, self._hk_region_edit, self._hk_close_edit):
+            _ed.hotkey_changed.connect(self._on_hotkeys_changed)
+            _ed.recording_changed.connect(self._hotkeys.set_paused)
 
         for label_text, widget in [
             ("전체화면 캡처", self._hk_fullscreen_edit),
@@ -2673,6 +2698,7 @@ class MainWindow(QMainWindow):
         self._config.hotkey_region = self._hk_region_edit.hotkey
         self._config.hotkey_close_overlay = self._hk_close_edit.hotkey
         self._config.save()
+        self._hotkeys.set_paused(False)
         if self._hotkeys.register(self._config):
             self._status_label.setText("단축키 자동 적용됨")
 
