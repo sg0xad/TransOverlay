@@ -1,4 +1,5 @@
 # TransOverlay
+<img width="478" height="513" alt="image" src="https://github.com/user-attachments/assets/ccc9e4a1-383b-425f-937e-583df49e81b6" />
 
 단축키로 화면 전체 또는 원하는 영역을 캡처해 **Google 번역**으로 번역한 뒤, 원문 위치 그대로 화면 위 오버레이로 자연스럽게 표시해 주는 Windows 데스크톱 프로그램입니다.
 
